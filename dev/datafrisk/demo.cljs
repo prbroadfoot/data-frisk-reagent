@@ -1,6 +1,7 @@
 (ns datafrisk.demo
   (:require [reagent.core :as r]
-            [datafrisk.core :as d]))
+            [datafrisk.core :as d]
+            [datafrisk.demo-data :as data]))
 
 (enable-console-print!)
 
@@ -27,10 +28,11 @@
   (let [state @state]
     [:div
      [Animals state]
-     [d/DataFriskShell
+     [d/DataFriskView
       ;; List of arguments you want to visualize
       state
-      {:a :b :c :d :e :f}]]))
+      data/http-response
+      #_{:a :b :c :d :e :f}]]))
 
 (defn mount-root []
   (r/render
