@@ -1,7 +1,8 @@
 (ns datafrisk.view
   (:require [cljs.pprint :refer [pprint]]
             [reagent.core :as r]
-            [datafrisk.util :as u]))
+            [datafrisk.util :as u]
+            [cljs.reader :refer [read-string]]))
 
 (declare DataFrisk)
 
@@ -162,14 +163,23 @@
                              (str (count data) " items")
                              [:span (if (vector? data) "]" ")")]]))
 
+(defn change-panel-path [{:keys [event emit-fn path]}]
+  (.stopPropagation event)
+  (emit-fn :change-panel-path path)
+  (when (.-ctrlKey event)
+    (emit-fn :copy path)))
+
 (defn KeyValNode [{[k v] :data :keys [path metadata-paths emit-fn swappable]}]
   (let [path-to-here (conj path k)
         expandable-node? (and (expandable? v)
                               (not (empty? v)))
         metadata (get metadata-paths path-to-here)
-        expanded? (:expanded? metadata)]
+        expanded? (:expanded? metadata)
+        highlight? (:highlight? metadata)]
     [:div {:style {:display "flex"
-                   :flex-flow "column"}}
+                   :flex-flow "column"}
+           :on-click #(change-panel-path
+                       {:event %, :emit-fn emit-fn, :path (conj path k)})}
      [:div {:style {:display "flex"}}
       [:div {:style {:flex "0 0 20px"}}
        (when expandable-node?
@@ -190,7 +200,8 @@
                   :metadata-paths metadata-paths
                   :emit-fn emit-fn}])]]]]
      (when expanded?
-       [:div {:style {:flex "1"}}
+       [:div {:style {:flex "1"
+                      :background-color (when highlight? "#fff9db")}}
         [DataFrisk {:hide-header? true
                     :data v
                     :swappable swappable
@@ -202,7 +213,9 @@
   (let [metadata (get metadata-paths path)
         expanded? (:expanded? metadata)]
     [:div {:style {:display "flex"
-                   :flex-flow "column"}}
+                   :flex-flow "column"}
+           :on-click #(change-panel-path
+                       {:event %, :emit-fn emit-fn, :path path})}
      (when-not hide-header?
        [:div {:style {:display "flex"}}
         (when (:error metadata)
@@ -232,7 +245,9 @@
   (let [metadata (get metadata-paths path)
         expanded? (:expanded? metadata)]
     [:div {:style {:display "flex"
-                   :flex-flow "column"}}
+                   :flex-flow "column"}
+           :on-click #(change-panel-path
+                       {:event %, :emit-fn emit-fn, :path path})}
      (when-not hide-header?
        [:div {:style {:display "flex"}}
         (when (:error metadata)
@@ -260,9 +275,12 @@
 
 (defn MapNode [{:keys [data path metadata-paths emit-fn hide-header?] :as all}]
   (let [metadata (get metadata-paths path)
-        expanded? (:expanded? metadata)]
+        expanded? (:expanded? metadata)
+        highlight? (:highlight? metadata)]
     [:div {:style {:display "flex"
-                   :flex-flow "column"}}
+                   :flex-flow "column"}
+           :on-click #(change-panel-path
+                       {:event %, :emit-fn emit-fn, :path path})}
      (when-not hide-header?
        [:div {:style {:display "flex"}}
         (when (:error metadata)
@@ -278,7 +296,8 @@
          [KeySet (keys data)]
          [:span "}"]]])
      (when expanded?
-       [:div {:style {:flex "0 1 auto" :paddingLeft "20px"}}
+       [:div {:style {:flex "0 1 auto" :paddingLeft "20px"
+                      :background-color (when highlight? "#fff9db")}}
         (when (:error metadata)
           [:div {:style {:paddingBottom "4px"}}
            [ErrorText (:error metadata)]])
@@ -286,12 +305,15 @@
              (sort-by (fn [[k _]] (str k)))
              (map-indexed (fn [i x] ^{:key i} [KeyValNode (assoc all :data x)])))])]))
 
-(defn DataFrisk [{:keys [data] :as all}]
+(defn DataFrisk [{:keys [data emit-fn path] :as all}]
   (cond (map? data) [MapNode all]
         (set? data) [SetNode all]
         (or (seq? data) (vector? data)) [ListVecNode all]
         (satisfies? IDeref data) [DataFrisk (assoc all :data @data)]
-        :else [:div {:style {:paddingLeft "20px"}} [Node all]]))
+        :else [:div {:style {:paddingLeft "20px"}
+                     :on-click #(change-panel-path
+                                 {:event %, :emit-fn emit-fn, :path path})}
+               [Node all]]))
 
 (defn conj-to-set [coll x]
   (conj (or coll #{}) x))
@@ -354,30 +376,101 @@
 (defn collapse-all [metadata-paths]
   (u/map-vals #(assoc % :expanded? false) metadata-paths))
 
+(defn expand-to-path [path data current-expanded-paths]
+  (let [path-found? (-> (get-in data (drop-last path))
+                        (contains? (last path)))]
+    (cond
+      (empty? path)
+      {}
+
+      path-found?
+      (let [paths (reductions conj [] path)
+            metadata-paths (reduce #(assoc %1 %2 {:expanded? true})
+                                   {}
+                                   paths)]
+        (-> metadata-paths
+            (assoc-in [path :highlight?] true)))
+
+      :else
+      current-expanded-paths)))
+
 (defn emit-fn-factory [state-atom id swappable]
   (fn [event & args]
     (case event
       :expand (swap! state-atom assoc-in [:data-frisk id :metadata-paths (first args) :expanded?] true)
       :expand-all (swap! state-atom update-in [:data-frisk id :metadata-paths] (partial expand-all-paths (first args)))
+      :expand-to-path (swap! state-atom update-in [:data-frisk id :metadata-paths] (partial expand-to-path (first args) (second args)))
       :contract (swap! state-atom assoc-in [:data-frisk id :metadata-paths (first args) :expanded?] false)
       :collapse-all (swap! state-atom update-in [:data-frisk id :metadata-paths] collapse-all)
       :copy (copy-to-clipboard (first args))
       :changed (let [[path value] args]
                  (if (seq path)
                    (swap! swappable assoc-in path value)
-                   (reset! swappable value))))))
+                   (reset! swappable value)))
+      :change-panel-path (swap! state-atom assoc-in [:panel-path] (first args)))))
+
+(defn vector-str [s]
+  (let [s (if (.startsWith s "[") s (str "[" s))
+        s (if (.endsWith s "]") s (str s "]"))]
+    s))
+
+(defn PathInput [emit-fn data]
+  (let [v (r/atom "")]
+    (fn []
+      [:input {:style {:width "300px" :padding "2px" :margin-right "5px"}
+               :type "text"
+               :placeholder "enter a path..."
+               :value @v
+               :on-change #(let [new-val (-> % .-target .-value)]
+                             (reset! v new-val)
+                             (try
+                               (emit-fn :expand-to-path (read-string (vector-str new-val)) data)
+                               (catch js/Error e)))}])))
+
+(defn ModalPanel [{:keys [emit-fn data panel-path]}]
+  (let [show? (r/atom false)]
+    (fn [{:keys [emit-fn data panel-path]}]
+      (if @show?
+        [:div
+         {:style {:position "fixed" :top "10px" :right "10px"
+                  :padding "10px"
+                  :background-color "rgb(240, 240, 240)"
+                  :display "flex"
+                  :flex-direction "column"
+                  :align-items "flex-end"}}
+         [:div
+          [PathInput emit-fn data]
+          [:a {:style { :font-size "16px" :cursor "pointer"}
+               :on-click #(swap! show? not)} "✖"]]
+         [:p {:style {:padding "0" :margin "2px" :margin-top "5px"}}
+          (str @panel-path)]]
+
+        [:button {:style (merge button-style
+                                {:borderTop "1px solid darkgray"
+                                 :borderBottom "1px solid darkgray"
+                                 :borderRight "1px solid darkgray"
+                                 :borderLeft "0"})
+                  :on-click #(swap! show? not)} "Panel"]))))
+
+(defn get-data-frisk [state-atom]
+  (:data-frisk @state-atom))
+
+(defn get-panel-path [state-atom]
+  (:panel-path @state-atom))
 
 (defn Root [data id state-atom]
-  (let [data-frisk (:data-frisk @state-atom)
+  (let [data-frisk @(r/track get-data-frisk state-atom)
         swappable (when (satisfies? IAtom data)
                     data)
         emit-fn (emit-fn-factory state-atom id swappable)
-        metadata-paths (get-in data-frisk [id :metadata-paths])]
+        metadata-paths (get-in data-frisk [id :metadata-paths])
+        panel-path (r/track get-panel-path state-atom)]
     [:div
      [:div {:style {:padding "4px 2px"}}
       [ExpandAllButton emit-fn data]
       [CollapseAllButton emit-fn]
-      [CopyButton emit-fn data]]
+      [CopyButton emit-fn data]
+      [ModalPanel {:emit-fn emit-fn, :data data, :panel-path panel-path}]]
      [:div {:style {:flex "0 1 auto"}}
       [DataFrisk {:data data
                   :swappable swappable
